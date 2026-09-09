@@ -2131,8 +2131,8 @@ void CoreWrapper::process(
 				Transform correction = rtabmap_conversions::getMovingTransform(
 						frameId_,
 						odomFrameId,
-						stamp,
 						rclcpp::Time(globalPoseMsg.header.stamp.sec, globalPoseMsg.header.stamp.nanosec),
+						stamp,
 						*tfBuffer_,
 						waitForTransform_);
 				if(!correction.isNull())
