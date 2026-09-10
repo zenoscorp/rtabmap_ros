@@ -240,4 +240,11 @@ install(DIRECTORY include/
    FILES_MATCHING PATTERN "*.h"
 )
 
+if(BUILD_TESTING)
+   find_package(launch_testing_ament_cmake REQUIRED)
+   find_package(ament_cmake_ros REQUIRED)
+   add_launch_test(test/test_global_pose_correction.py TIMEOUT 120
+      RUNNER "${ament_cmake_ros_DIR}/run_test_isolated.py")
+endif()
+
 ament_package()
