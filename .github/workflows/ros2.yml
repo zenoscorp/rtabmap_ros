@@ -24,7 +24,7 @@ jobs:
         include:
         - ros_distro: jazzy
           skip_keys: ''
-          packages: 'rtabmap_ros'
+          packages: 'rtabmap_ros rtabmap_slam'
       fail-fast: false
     container:
       image: osrf/ros:${{ matrix.ros_distro }}-desktop-full
