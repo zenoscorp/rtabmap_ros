@@ -270,4 +270,11 @@ install(DIRECTORY include/
    FILES_MATCHING PATTERN "*.h"
 )
 
+if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
+  ament_add_gtest(test_maps_manager_cache test/test_maps_manager_cache.cpp)
+  target_link_libraries(test_maps_manager_cache rtabmap_util_plugins ${RTABMap_TARGETS})
+  ament_target_dependencies(test_maps_manager_cache ${Libraries})
+endif()
+
 ament_package()

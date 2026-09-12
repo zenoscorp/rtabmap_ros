@@ -4506,6 +4506,10 @@ void CoreWrapper::publishStats(const rclcpp::Time & stamp)
 		msg->header.frame_id = mapFrameId_;
 
 		rtabmap_conversions::infoToROS(stats, *msg);
+		msg->stats_keys.push_back("Memory/Local_grid_cache/nodes");
+		msg->stats_values.push_back(float(mapsManager_.getLocalGridCache().size()));
+		msg->stats_keys.push_back("Memory/Local_grid_cache/MB");
+		msg->stats_values.push_back(float(mapsManager_.getLocalGridCache().getMemoryUsed())/1048576.0f);
 		infoPub_->publish(std::move(msg));
 	}
 
