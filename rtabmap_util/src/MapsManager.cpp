@@ -39,6 +39,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <rtabmap/core/Version.h>
 #include <rtabmap/core/OccupancyGrid.h>
 #include <pcl/search/kdtree.h>
+#include <cstring>
 
 #include <pcl_conversions/pcl_conversions.h>
 #include <rtabmap/core/LocalGridMaker.h>
@@ -59,6 +60,32 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 using namespace rtabmap;
 
 namespace rtabmap_util {
+
+namespace {
+
+bool sameGridCells(const cv::Mat & a, const cv::Mat & b)
+{
+	if(a.empty() || b.empty()) return a.empty() && b.empty();
+	if(a.dims != 2 || b.dims != 2 || a.size() != b.size() || a.type() != b.type()) return false;
+	for(int row = 0; row < a.rows; ++row)
+	{
+		if(std::memcmp(a.ptr(row), b.ptr(row), a.cols * a.elemSize()) != 0) return false;
+	}
+	return true;
+}
+
+bool canReloadGrid(int id, const LocalGrid & grid, const Memory & memory)
+{
+	SensorData data = memory.getNodeData(id, false, false, false, true);
+	if(data.gridCellSize() <= 0 || data.gridCellSize() != grid.cellSize ||
+			data.gridViewPoint() != grid.viewPoint) return false;
+	cv::Mat ground, obstacles, empty;
+	data.uncompressData(0, 0, 0, 0, &ground, &obstacles, &empty);
+	return sameGridCells(ground, grid.groundCells) &&
+			sameGridCells(obstacles, grid.obstacleCells) && sameGridCells(empty, grid.emptyCells);
+}
+
+} // namespace
 
 MapsManager::MapsManager() :
 		cloudOutputVoxelized_(true),
@@ -640,6 +667,22 @@ std::map<int, rtabmap::Transform> MapsManager::updateMapCaches(
 #endif
 
 		localMaps_.clear(true);
+
+		if(mapCacheCleanup_ && occupancySavedInDB && memory->isBinDataKept())
+		{
+			LocalGridCache retained;
+			for(const auto & entry : localMaps_.localGrids())
+			{
+				// Keep every requested or working-memory grid for subsequent publishers.
+				// Unsaved or caller-supplied replacements must not be lost on eviction.
+				if(entry.first <= 0 || uContains(poses, entry.first) ||
+						memory->getSignature(entry.first) || !canReloadGrid(entry.first, entry.second, *memory))
+				{
+					localMaps_.shareTo(entry.first, retained);
+				}
+			}
+			localMaps_ = retained;
+		}
 
 
 		for(std::map<int, pcl::PointCloud<pcl::PointXYZRGB>::Ptr >::iterator iter=groundClouds_.begin();

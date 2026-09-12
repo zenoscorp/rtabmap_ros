@@ -100,6 +100,7 @@ public:
 #endif
 	const rtabmap::OccupancyGrid * getOccupancyGrid() const {return occupancyGrid_;}
 	const rtabmap::LocalGridMaker * getLocalMapMaker() const {return localMapMaker_;}
+	const rtabmap::LocalGridCache & getLocalGridCache() const {return localMaps_;}
 
 private:
 	// mapping stuff
