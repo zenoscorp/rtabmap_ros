@@ -103,3 +103,9 @@ sudo apt install ros-$ROS_DISTRO-rtabmap-ros
     colcon build --symlink-install --cmake-args -DRTABMAP_SYNC_MULTI_RGBD=ON -DRTABMAP_SYNC_USER_DATA=ON -DCMAKE_BUILD_TYPE=Release
     ```
 
+
+## Zenos 0.22.1 cache maintenance
+
+With `map_cleanup=true`, MapsManager releases decoded local grids after their nodes leave both the requested poses and RTAB-Map working memory. Before release, it verifies that the database can supply identical grid cells, resolution, and viewpoint. Revisits and map requests reload these grids through the existing database path. Unsaved grids, caller overrides that differ from the database, and grids streamed without a Memory object remain cached. `map_cleanup=false` preserves the previous retention behavior.
+
+The Info statistics `Memory/Local_grid_cache/nodes` and `Memory/Local_grid_cache/MB` report cache entries and decoded payload size; the latter is not process memory. Build both `rtabmap_util` and `rtabmap_slam` against the 0.22.1 core to use this change. The `test_maps_manager_cache` target checks eviction, preservation, revisits, pose corrections, and equivalent grid, cloud, and octomap publications.
