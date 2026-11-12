@@ -39,6 +39,8 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <rtabmap/core/Version.h>
 #include <rtabmap/core/OccupancyGrid.h>
 #include <pcl/search/kdtree.h>
+#include <algorithm>
+#include <cstring>
 
 #include <pcl_conversions/pcl_conversions.h>
 #include <rtabmap/core/LocalGridMaker.h>
@@ -59,6 +61,40 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 using namespace rtabmap;
 
 namespace rtabmap_util {
+
+namespace {
+
+bool sameGridCells(const cv::Mat & a, const cv::Mat & b)
+{
+	if(a.empty() || b.empty()) return a.empty() && b.empty();
+	if(a.dims != 2 || b.dims != 2 || a.size() != b.size() || a.type() != b.type()) return false;
+	for(int row = 0; row < a.rows; ++row)
+	{
+		if(std::memcmp(a.ptr(row), b.ptr(row), a.cols * a.elemSize()) != 0) return false;
+	}
+	return true;
+}
+
+bool canReloadGrid(int id, const LocalGrid & grid, const Memory & memory)
+{
+	SensorData data = memory.getNodeData(id, false, false, false, true);
+	if(data.gridCellSize() <= 0 || data.gridCellSize() != grid.cellSize ||
+			data.gridViewPoint() != grid.viewPoint) return false;
+	cv::Mat ground, obstacles, empty;
+	data.uncompressData(0, 0, 0, 0, &ground, &obstacles, &empty);
+	return sameGridCells(ground, grid.groundCells) &&
+			sameGridCells(obstacles, grid.obstacleCells) && sameGridCells(empty, grid.emptyCells);
+}
+
+bool sameGridBuffers(const LocalGrid & a, const LocalGrid & b)
+{
+	return a.groundCells.data == b.groundCells.data &&
+			a.obstacleCells.data == b.obstacleCells.data &&
+			a.emptyCells.data == b.emptyCells.data &&
+			a.cellSize == b.cellSize && a.viewPoint == b.viewPoint;
+}
+
+} // namespace
 
 MapsManager::MapsManager() :
 		cloudOutputVoxelized_(true),
@@ -312,6 +348,7 @@ void MapsManager::set2DMap(
 void MapsManager::clear()
 {
 	localMaps_.clear();
+	unreloadableGrids_.clear();
 	assembledGround_->clear();
 	assembledObstacles_->clear();
 	assembledGroundPoses_.clear();
@@ -480,30 +517,34 @@ std::map<int, rtabmap::Transform> MapsManager::updateMapCaches(
 			filteredPoses.erase(0);
 		}
 
-		const std::map<int, rtabmap::Transform> emptyNodes;
-		const std::map<int, rtabmap::Transform> * addedNodes = &emptyNodes;
+		// Nodes already added to each map updated in this call. A released grid must be
+		// reloaded if any of these maps lacks its node, so no single map's set is enough.
+		std::vector<const std::map<int, rtabmap::Transform> *> mapNodes;
 		bool fullUpdateNeeded = true;
 #if RTABMAP_VERSION_MAJOR>0 || (RTABMAP_VERSION_MAJOR==0 && RTABMAP_VERSION_MINOR>=23)
 		if(updateGrid) {
 			fullUpdateNeeded = occupancyGrid_->fullUpdateNeeded(filteredPoses);
-			addedNodes = &occupancyGrid_->addedNodes();
+			mapNodes.push_back(&occupancyGrid_->addedNodes());
 		}
 #if defined(WITH_OCTOMAP_MSGS) and defined(RTABMAP_OCTOMAP)
 		if(updateOctomap) {
 			fullUpdateNeeded = fullUpdateNeeded || octomap_->fullUpdateNeeded(filteredPoses);
-			if(octomap_->addedNodes().size() < addedNodes->size()) {
-				addedNodes = &octomap_->addedNodes();
-			}
+			mapNodes.push_back(&octomap_->addedNodes());
 		}
 #endif
 #if defined(WITH_GRID_MAP_ROS) and defined(RTABMAP_GRIDMAP)
 		if(updateElevation) {
 			fullUpdateNeeded = fullUpdateNeeded || elevationMap_->fullUpdateNeeded(filteredPoses);
-			if(elevationMap_->addedNodes().size() < addedNodes->size()) {
-				addedNodes = &elevationMap_->addedNodes();
-			}
+			mapNodes.push_back(&elevationMap_->addedNodes());
 		}
 #endif
+		// publishMaps() builds the clouds from cached grids of nodes not yet assembled.
+		if(cloudMapPub_->get_subscription_count() || cloudGroundPub_->get_subscription_count()) {
+			mapNodes.push_back(&assembledGroundPoses_);
+		}
+		if(cloudMapPub_->get_subscription_count() || cloudObstaclesPub_->get_subscription_count()) {
+			mapNodes.push_back(&assembledObstaclePoses_);
+		}
 		if(fullUpdateNeeded) {
 			UINFO("Full occupancy grid map update needed");
 		}
@@ -527,7 +568,8 @@ std::map<int, rtabmap::Transform> MapsManager::updateMapCaches(
 			{
 				rtabmap::SensorData data;
 				if(iter->first == 0 || (
-					(fullUpdateNeeded || addedNodes->find(iter->first) == addedNodes->end()) && 
+					(fullUpdateNeeded || mapNodes.empty() || std::any_of(mapNodes.begin(), mapNodes.end(),
+						[&](const std::map<int, rtabmap::Transform> * nodes) {return !uContains(*nodes, iter->first);})) && 
 						!uContains(localMaps_.localGrids(), iter->first)))
 				{
 					UDEBUG("Data required for %d", iter->first);
@@ -668,6 +710,38 @@ std::map<int, rtabmap::Transform> MapsManager::updateMapCaches(
 #endif
 
 		localMaps_.clear(true);
+
+		if(mapCacheCleanup_ && occupancySavedInDB && memory->isBinDataKept())
+		{
+			LocalGridCache retained;
+			std::map<int, LocalGrid> unreloadable;
+			for(const auto & entry : localMaps_.localGrids())
+			{
+				// A grid that failed the reload check stays unreloadable while the same
+				// buffers are cached, so skip the database read for it.
+				const auto known = unreloadableGrids_.find(entry.first);
+				bool cannotReload = known != unreloadableGrids_.end() && sameGridBuffers(known->second, entry.second);
+				// Keep every requested or working-memory grid for subsequent publishers.
+				// Unsaved or caller-supplied replacements must not be lost on eviction.
+				bool retain = cannotReload || entry.first <= 0 || uContains(poses, entry.first) ||
+						memory->getSignature(entry.first);
+				if(!retain && !canReloadGrid(entry.first, entry.second, *memory))
+				{
+					cannotReload = true;
+					retain = true;
+				}
+				if(retain)
+				{
+					localMaps_.shareTo(entry.first, retained);
+				}
+				if(cannotReload)
+				{
+					unreloadable.insert(entry);
+				}
+			}
+			localMaps_ = retained;
+			unreloadableGrids_.swap(unreloadable);
+		}
 
 
 		for(std::map<int, pcl::PointCloud<pcl::PointXYZRGB>::Ptr >::iterator iter=groundClouds_.begin();
@@ -1433,6 +1507,7 @@ void MapsManager::publishMaps(
 			UINFO("MapsManager: cleanup %ld grid maps (~%ld MB)...", localMaps_.size(), totalBytes/1048576);
 		}
 		localMaps_.clear();
+		unreloadableGrids_.clear();
 	}
 }
 
