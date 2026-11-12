@@ -39,6 +39,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <rtabmap/core/Version.h>
 #include <rtabmap/core/OccupancyGrid.h>
 #include <pcl/search/kdtree.h>
+#include <algorithm>
 #include <cstring>
 
 #include <pcl_conversions/pcl_conversions.h>
@@ -516,28 +517,25 @@ std::map<int, rtabmap::Transform> MapsManager::updateMapCaches(
 			filteredPoses.erase(0);
 		}
 
-		const std::map<int, rtabmap::Transform> emptyNodes;
-		const std::map<int, rtabmap::Transform> * addedNodes = &emptyNodes;
+		// Nodes already added to each map updated in this call. A released grid must be
+		// reloaded if any of these maps lacks its node, so no single map's set is enough.
+		std::vector<const std::map<int, rtabmap::Transform> *> mapNodes;
 		bool fullUpdateNeeded = true;
 #if RTABMAP_VERSION_MAJOR>0 || (RTABMAP_VERSION_MAJOR==0 && RTABMAP_VERSION_MINOR>=23)
 		if(updateGrid) {
 			fullUpdateNeeded = occupancyGrid_->fullUpdateNeeded(filteredPoses);
-			addedNodes = &occupancyGrid_->addedNodes();
+			mapNodes.push_back(&occupancyGrid_->addedNodes());
 		}
 #if defined(WITH_OCTOMAP_MSGS) and defined(RTABMAP_OCTOMAP)
 		if(updateOctomap) {
 			fullUpdateNeeded = fullUpdateNeeded || octomap_->fullUpdateNeeded(filteredPoses);
-			if(octomap_->addedNodes().size() < addedNodes->size()) {
-				addedNodes = &octomap_->addedNodes();
-			}
+			mapNodes.push_back(&octomap_->addedNodes());
 		}
 #endif
 #if defined(WITH_GRID_MAP_ROS) and defined(RTABMAP_GRIDMAP)
 		if(updateElevation) {
 			fullUpdateNeeded = fullUpdateNeeded || elevationMap_->fullUpdateNeeded(filteredPoses);
-			if(elevationMap_->addedNodes().size() < addedNodes->size()) {
-				addedNodes = &elevationMap_->addedNodes();
-			}
+			mapNodes.push_back(&elevationMap_->addedNodes());
 		}
 #endif
 		if(fullUpdateNeeded) {
@@ -563,7 +561,8 @@ std::map<int, rtabmap::Transform> MapsManager::updateMapCaches(
 			{
 				rtabmap::SensorData data;
 				if(iter->first == 0 || (
-					(fullUpdateNeeded || addedNodes->find(iter->first) == addedNodes->end()) && 
+					(fullUpdateNeeded || mapNodes.empty() || std::any_of(mapNodes.begin(), mapNodes.end(),
+						[&](const std::map<int, rtabmap::Transform> * nodes) {return !uContains(*nodes, iter->first);})) && 
 						!uContains(localMaps_.localGrids(), iter->first)))
 				{
 					UDEBUG("Data required for %d", iter->first);

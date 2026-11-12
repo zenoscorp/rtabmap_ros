@@ -9,6 +9,9 @@ All rights reserved. (BSD-3-Clause, see the repository root.)
 #include <rtabmap/core/DBDriver.h>
 #include <rtabmap/core/Memory.h>
 #include <rtabmap/core/OccupancyGrid.h>
+#if defined(WITH_OCTOMAP_MSGS) and defined(RTABMAP_OCTOMAP)
+#include <rtabmap/core/OctoMap.h>
+#endif
 #include <rtabmap/core/Signature.h>
 #include <pcl_conversions/pcl_conversions.h>
 #include <algorithm>
@@ -363,6 +366,30 @@ TEST_F(MapsManagerCacheTest, ChecksAGridThatCannotBeReloadedOnlyOnce)
 	candidate_->updateMapCaches(pose(2), memory_.get(), true, false);
 	candidate_->updateMapCaches(pose(1), memory_.get(), true, false);
 	EXPECT_FALSE(cached(2));
+}
+
+TEST_F(MapsManagerCacheTest, ReloadsAGridThatOnlyAnotherMapHasAdded)
+{
+#if defined(WITH_OCTOMAP_MSGS) and defined(RTABMAP_OCTOMAP)
+	addGridsThroughMemory(5);
+	auto updateMaps = [&](const std::map<int, rtabmap::Transform> & poses, bool grid, bool octomap) {
+		candidate_->updateMapCaches(poses, memory_.get(), grid, octomap);
+		reference_->updateMapCaches(poses, memory_.get(), grid, octomap);
+	};
+	// Nodes 4 and 5 stay in working memory and make the grid's node set the larger one.
+	updateMaps(poses({1, 4, 5}), true, false);
+	updateMaps(poses({1, 2}), false, true);
+	updateMaps(poses({1}), true, true);
+	ASSERT_FALSE(cached(2));
+	// Only the octomap has node 2. The grid must still get node 2 from the database.
+	ASSERT_EQ(candidate_->getOctomap()->addedNodes().count(2), 1u);
+	ASSERT_EQ(candidate_->getOccupancyGrid()->addedNodes().count(2), 0u);
+	updateMaps(poses({1, 2}), true, true);
+	EXPECT_EQ(candidate_->getOccupancyGrid()->addedNodes().count(2), 1u);
+	compareMaps();
+#else
+	GTEST_SKIP() << "Built without octomap";
+#endif
 }
 
 } // namespace
