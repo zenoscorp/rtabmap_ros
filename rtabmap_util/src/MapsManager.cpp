@@ -85,6 +85,14 @@ bool canReloadGrid(int id, const LocalGrid & grid, const Memory & memory)
 			sameGridCells(obstacles, grid.obstacleCells) && sameGridCells(empty, grid.emptyCells);
 }
 
+bool sameGridBuffers(const LocalGrid & a, const LocalGrid & b)
+{
+	return a.groundCells.data == b.groundCells.data &&
+			a.obstacleCells.data == b.obstacleCells.data &&
+			a.emptyCells.data == b.emptyCells.data &&
+			a.cellSize == b.cellSize && a.viewPoint == b.viewPoint;
+}
+
 } // namespace
 
 MapsManager::MapsManager() :
@@ -339,6 +347,7 @@ void MapsManager::set2DMap(
 void MapsManager::clear()
 {
 	localMaps_.clear();
+	unreloadableGrids_.clear();
 	assembledGround_->clear();
 	assembledObstacles_->clear();
 	assembledGroundPoses_.clear();
@@ -699,17 +708,33 @@ std::map<int, rtabmap::Transform> MapsManager::updateMapCaches(
 		if(mapCacheCleanup_ && occupancySavedInDB && memory->isBinDataKept())
 		{
 			LocalGridCache retained;
+			std::map<int, LocalGrid> unreloadable;
 			for(const auto & entry : localMaps_.localGrids())
 			{
+				// A grid that failed the reload check stays unreloadable while the same
+				// buffers are cached, so skip the database read for it.
+				const auto known = unreloadableGrids_.find(entry.first);
+				bool cannotReload = known != unreloadableGrids_.end() && sameGridBuffers(known->second, entry.second);
 				// Keep every requested or working-memory grid for subsequent publishers.
 				// Unsaved or caller-supplied replacements must not be lost on eviction.
-				if(entry.first <= 0 || uContains(poses, entry.first) ||
-						memory->getSignature(entry.first) || !canReloadGrid(entry.first, entry.second, *memory))
+				bool retain = cannotReload || entry.first <= 0 || uContains(poses, entry.first) ||
+						memory->getSignature(entry.first);
+				if(!retain && !canReloadGrid(entry.first, entry.second, *memory))
+				{
+					cannotReload = true;
+					retain = true;
+				}
+				if(retain)
 				{
 					localMaps_.shareTo(entry.first, retained);
 				}
+				if(cannotReload)
+				{
+					unreloadable.insert(entry);
+				}
 			}
 			localMaps_ = retained;
+			unreloadableGrids_.swap(unreloadable);
 		}
 
 
@@ -1476,6 +1501,7 @@ void MapsManager::publishMaps(
 			UINFO("MapsManager: cleanup %ld grid maps (~%ld MB)...", localMaps_.size(), totalBytes/1048576);
 		}
 		localMaps_.clear();
+		unreloadableGrids_.clear();
 	}
 }
 

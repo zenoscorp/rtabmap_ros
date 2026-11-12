@@ -8,6 +8,7 @@ All rights reserved. (BSD-3-Clause, see the repository root.)
 #include <rtabmap/core/Compression.h>
 #include <rtabmap/core/DBDriver.h>
 #include <rtabmap/core/Memory.h>
+#include <rtabmap/core/OccupancyGrid.h>
 #include <rtabmap/core/Signature.h>
 #include <pcl_conversions/pcl_conversions.h>
 #include <algorithm>
@@ -36,6 +37,26 @@ rtabmap::Signature gridSignature(int id, float obstacleX = 0.3f)
 			rtabmap::Transform(float(id), 0, 0, 0, 0, 0), rtabmap::Transform(), data);
 }
 
+// Sensor data with an uncompressed local grid, as a node would arrive at Memory::update().
+rtabmap::SensorData rawGridData(int id)
+{
+	rtabmap::SensorData data;
+	data.setStamp(1000.0 + id);
+	data.setOccupancyGrid(
+			(cv::Mat_<cv::Vec3f>(1, 1) << cv::Vec3f(0, 0, 0)),
+			(cv::Mat_<cv::Vec3f>(1, 1) << cv::Vec3f(0.3f, 0.3f, 0.5f)),
+			(cv::Mat_<cv::Vec3f>(1, 1) << cv::Vec3f(-0.3f, 0.3f, 0)),
+			0.1f, cv::Point3f());
+	return data;
+}
+
+std::map<int, rtabmap::Transform> poses(const std::vector<int> & ids, float correction = 0)
+{
+	std::map<int, rtabmap::Transform> result;
+	for(int id : ids) result.emplace(id, rtabmap::Transform(float(id) + correction, 0, 0, 0, 0, 0));
+	return result;
+}
+
 class MapsManagerCacheTest : public ::testing::Test
 {
 protected:
@@ -47,9 +68,15 @@ protected:
 		ASSERT_GE(fd, 0);
 		close(fd);
 		path_ = path;
+		makeManager("candidate", true, candidateNode_, candidate_);
+		makeManager("reference", false, referenceNode_, reference_);
+	}
+
+	// Grids written to the database directly, so they start outside working memory.
+	void writeGridsThroughDriver()
+	{
 		memory_.reset(new rtabmap::Memory);
 		ASSERT_TRUE(memory_->init(path_, true));
-		// Add persisted grids after init so they start outside working memory.
 		std::unique_ptr<rtabmap::DBDriver> driver(rtabmap::DBDriver::create());
 		ASSERT_TRUE(driver->openConnection(path_));
 		for(int id = 1; id <= 3; ++id)
@@ -60,8 +87,43 @@ protected:
 		driver->closeConnection(true);
 		ASSERT_EQ(memory_->getSignature(1), nullptr);
 		ASSERT_GT(memory_->getNodeData(1, false, false, false, true).gridCellSize(), 0);
-		makeManager("candidate", true, candidateNode_, candidate_);
-		makeManager("reference", false, referenceNode_, reference_);
+	}
+
+	// Grids added through Memory::update(), which moves older nodes out of working
+	// memory into the database save queue as it would during mapping.
+	void addGridsThroughMemory(int count)
+	{
+		memory_.reset(new rtabmap::Memory);
+		ASSERT_TRUE(memory_->init(path_, true, {
+				{"Mem/STMSize", "1"},
+				{"Mem/RehearsalSimilarity", "1.0"},
+				{"Kp/MaxFeatures", "-1"},
+				{"RGBD/CreateOccupancyGrid", "true"}}));
+		for(int id = 1; id <= count; ++id)
+		{
+			ASSERT_TRUE(memory_->update(rawGridData(id), poses({id}).at(id), cv::Mat::eye(6, 6, CV_64FC1)));
+			ASSERT_EQ(memory_->getLastSignatureId(), id);
+			memory_->forget();
+		}
+		// The newest node stays in short-term memory and the one before it in working memory.
+		for(int id = 1; id <= count - 2; ++id)
+		{
+			ASSERT_EQ(memory_->getSignature(id), nullptr) << id;
+			ASSERT_GT(memory_->getNodeData(id, false, false, false, true).gridCellSize(), 0) << id;
+		}
+		ASSERT_NE(memory_->getSignature(count - 1), nullptr);
+		ASSERT_NE(memory_->getSignature(count), nullptr);
+	}
+
+	void update(const std::map<int, rtabmap::Transform> & poses)
+	{
+		candidate_->updateMapCaches(poses, memory_.get(), true, false);
+		reference_->updateMapCaches(poses, memory_.get(), true, false);
+	}
+
+	bool cached(int id) const
+	{
+		return candidate_->getLocalGridCache().find(id) != candidate_->getLocalGridCache().end();
 	}
 
 	void TearDown() override
@@ -118,6 +180,7 @@ protected:
 
 TEST_F(MapsManagerCacheTest, ReloadsEvictedGridsForRevisitsAndCorrections)
 {
+	writeGridsThroughDriver();
 	for(const auto & step : std::vector<std::pair<int, float>>{{1, 0}, {2, 0}, {3, 0}, {1, 0}, {2, 0.15f}, {1, -0.15f}})
 	{
 		const auto poses = pose(step.first, step.second);
@@ -132,6 +195,7 @@ TEST_F(MapsManagerCacheTest, ReloadsEvictedGridsForRevisitsAndCorrections)
 
 TEST_F(MapsManagerCacheTest, RetainsWorkingMemoryGridsOutsideFilteredPoses)
 {
+	writeGridsThroughDriver();
 	double loadingTime = 0;
 	memory_->reactivateSignatures({1}, 1, loadingTime);
 	ASSERT_NE(memory_->getSignature(1), nullptr);
@@ -142,6 +206,7 @@ TEST_F(MapsManagerCacheTest, RetainsWorkingMemoryGridsOutsideFilteredPoses)
 
 TEST_F(MapsManagerCacheTest, RetainsUnsavedAndOverriddenGrids)
 {
+	writeGridsThroughDriver();
 	const std::map<int, rtabmap::Signature> unsaved{{4, gridSignature(4)}};
 	const std::map<int, rtabmap::Signature> overridden{{2, gridSignature(2, 0.8f)}};
 	candidate_->updateMapCaches(pose(4), memory_.get(), true, false, unsaved);
@@ -156,6 +221,7 @@ TEST_F(MapsManagerCacheTest, RetainsUnsavedAndOverriddenGrids)
 
 TEST_F(MapsManagerCacheTest, RetainsStreamedGridsWithoutMemory)
 {
+	writeGridsThroughDriver();
 	for(int id = 1; id <= 3; ++id)
 	{
 		candidate_->updateMapCaches(pose(id), nullptr, true, false, {{id, gridSignature(id)}});
@@ -165,6 +231,7 @@ TEST_F(MapsManagerCacheTest, RetainsStreamedGridsWithoutMemory)
 
 TEST_F(MapsManagerCacheTest, PublishesTheSameGridCloudAndOctomapAfterReload)
 {
+	writeGridsThroughDriver();
 	using Grid = nav_msgs::msg::OccupancyGrid;
 	using Cloud = sensor_msgs::msg::PointCloud2;
 	Grid::SharedPtr candidateGrid, referenceGrid;
@@ -232,6 +299,70 @@ TEST_F(MapsManagerCacheTest, PublishesTheSameGridCloudAndOctomapAfterReload)
 		EXPECT_EQ(candidate_->getLocalGridCache().size(), 1u);
 		++stamp;
 	}
+}
+
+TEST_F(MapsManagerCacheTest, ReleasedGridsReturnOnTheIncrementalPath)
+{
+	addGridsThroughMemory(5);
+	update(poses({1, 2}));
+	compareMaps();
+	// Node 2 keeps its pose, so the map only adds node 3 and node 1 is released.
+	ASSERT_FALSE(candidate_->getOccupancyGrid()->fullUpdateNeeded(poses({2, 3})));
+	update(poses({2, 3}));
+	compareMaps();
+	EXPECT_FALSE(cached(1));
+	// Node 1 returns at its old pose: the map is not rebuilt and its grid is not reloaded.
+	ASSERT_FALSE(candidate_->getOccupancyGrid()->fullUpdateNeeded(poses({1, 2, 3})));
+	update(poses({1, 2, 3}));
+	compareMaps();
+	EXPECT_FALSE(cached(1));
+	// A correction rebuilds the map from reloaded grids.
+	ASSERT_TRUE(candidate_->getOccupancyGrid()->fullUpdateNeeded(poses({1, 2, 3}, 0.15f)));
+	update(poses({1, 2, 3}, 0.15f));
+	compareMaps();
+	EXPECT_TRUE(cached(1));
+	update(poses({3}, 0.15f));
+	compareMaps();
+	EXPECT_FALSE(cached(1));
+	EXPECT_FALSE(cached(2));
+	update(poses({1, 2, 3}, 0.15f));
+	compareMaps();
+	update(poses({1, 2, 3}, 0.3f));
+	compareMaps();
+	// Node 4 is still in working memory, so its grid stays cached after it leaves the poses.
+	update(poses({4}));
+	update(poses({1}));
+	compareMaps();
+	EXPECT_TRUE(cached(4));
+	EXPECT_EQ(reference_->getLocalGridCache().size(), 4u);
+}
+
+TEST_F(MapsManagerCacheTest, ChecksAGridThatCannotBeReloadedOnlyOnce)
+{
+	writeGridsThroughDriver();
+	const rtabmap::Signature override = gridSignature(2, 0.8f);
+	candidate_->updateMapCaches(pose(2), memory_.get(), true, false, {{2, override}});
+	candidate_->updateMapCaches(pose(1), memory_.get(), true, false);
+	ASSERT_TRUE(cached(2));
+	// Make the database match the cached override. A repeated check would now pass.
+	{
+		std::unique_ptr<rtabmap::DBDriver> driver(rtabmap::DBDriver::create());
+		ASSERT_TRUE(driver->openConnection(path_));
+		cv::Mat ground, obstacles, empty;
+		override.sensorData().uncompressDataConst(0, 0, 0, 0, &ground, &obstacles, &empty);
+		driver->updateOccupancyGrid(2, ground, obstacles, empty, 0.1f, cv::Point3f());
+		driver->closeConnection(true);
+	}
+	cv::Mat obstacles;
+	memory_->getNodeData(2, false, false, false, true).uncompressDataConst(0, 0, 0, 0, 0, &obstacles, 0);
+	ASSERT_EQ(obstacles.at<cv::Vec3f>(0)[0], 0.8f);
+	candidate_->updateMapCaches(pose(3), memory_.get(), true, false);
+	EXPECT_TRUE(cached(2));
+	// Clearing the manager forgets the result.
+	candidate_->clear();
+	candidate_->updateMapCaches(pose(2), memory_.get(), true, false);
+	candidate_->updateMapCaches(pose(1), memory_.get(), true, false);
+	EXPECT_FALSE(cached(2));
 }
 
 } // namespace

@@ -145,6 +145,9 @@ private:
 	std::map<int, pcl::PointCloud<pcl::PointXYZRGB>::Ptr > obstacleClouds_;
 
 	rtabmap::LocalGridCache localMaps_;
+	// Cached grids that failed the database reload check, kept by shallow copy
+	// so the check is not repeated while the same grid stays cached.
+	std::map<int, rtabmap::LocalGrid> unreloadableGrids_;
 
 	rtabmap::OccupancyGrid * occupancyGrid_;
 	rtabmap::LocalGridMaker * localMapMaker_;
