@@ -392,4 +392,50 @@ TEST_F(MapsManagerCacheTest, ReloadsAGridThatOnlyAnotherMapHasAdded)
 #endif
 }
 
+TEST_F(MapsManagerCacheTest, ReloadsReleasedGridsForANewCloudSubscriber)
+{
+	addGridsThroughMemory(5);
+	update(poses({1, 2}));
+	update(poses({2, 3}));
+	update(poses({1, 2, 3}));
+	ASSERT_FALSE(cached(1));
+
+	// A cloud subscriber arrives after the grid already has node 1.
+	using Cloud = sensor_msgs::msg::PointCloud2;
+	Cloud::SharedPtr candidateCloud, referenceCloud;
+	const auto qos = rclcpp::QoS(1).reliable().transient_local();
+	auto cc = candidateNode_->create_subscription<Cloud>("cloud_map", qos,
+			[&](Cloud::SharedPtr message) {candidateCloud = message;});
+	auto rc = referenceNode_->create_subscription<Cloud>("cloud_map", qos,
+			[&](Cloud::SharedPtr message) {referenceCloud = message;});
+	rclcpp::executors::SingleThreadedExecutor executor;
+	executor.add_node(candidateNode_);
+	executor.add_node(referenceNode_);
+	auto waitFor = [&](auto ready) {
+		const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+		while(!ready() && std::chrono::steady_clock::now() < deadline)
+		{
+			executor.spin_some();
+			std::this_thread::sleep_for(std::chrono::milliseconds(10));
+		}
+		return ready();
+	};
+	ASSERT_TRUE(waitFor([&] {return cc->get_publisher_count() && rc->get_publisher_count();}));
+	update(poses({1, 2, 3}));
+	EXPECT_TRUE(cached(1));
+	candidate_->publishMaps(poses({1, 2, 3}), rclcpp::Time(10, 0), "map");
+	reference_->publishMaps(poses({1, 2, 3}), rclcpp::Time(10, 0), "map");
+	ASSERT_TRUE(waitFor([&] {return candidateCloud && referenceCloud;}));
+	auto points = [](const Cloud & message) {
+		pcl::PointCloud<pcl::PointXYZRGB> cloud;
+		pcl::fromROSMsg(message, cloud);
+		std::vector<std::array<float, 3>> result;
+		for(const auto & p : cloud) result.push_back({p.x, p.y, p.z});
+		std::sort(result.begin(), result.end());
+		return result;
+	};
+	EXPECT_FALSE(points(*referenceCloud).empty());
+	EXPECT_EQ(points(*candidateCloud), points(*referenceCloud));
+}
+
 } // namespace

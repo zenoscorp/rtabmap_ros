@@ -538,6 +538,13 @@ std::map<int, rtabmap::Transform> MapsManager::updateMapCaches(
 			mapNodes.push_back(&elevationMap_->addedNodes());
 		}
 #endif
+		// publishMaps() builds the clouds from cached grids of nodes not yet assembled.
+		if(cloudMapPub_->get_subscription_count() || cloudGroundPub_->get_subscription_count()) {
+			mapNodes.push_back(&assembledGroundPoses_);
+		}
+		if(cloudMapPub_->get_subscription_count() || cloudObstaclesPub_->get_subscription_count()) {
+			mapNodes.push_back(&assembledObstaclePoses_);
+		}
 		if(fullUpdateNeeded) {
 			UINFO("Full occupancy grid map update needed");
 		}
